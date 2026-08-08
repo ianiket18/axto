@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/aniket/axto/internal/keys"
 	"github.com/aniket/axto/internal/mint"
@@ -13,11 +14,16 @@ import (
 
 func newTestHandler(t *testing.T, internalToken string) *Handler {
 	t.Helper()
+	return newTestHandlerWithMaxTTL(t, internalToken, 0)
+}
+
+func newTestHandlerWithMaxTTL(t *testing.T, internalToken string, maxTTL time.Duration) *Handler {
+	t.Helper()
 	store, err := keys.NewInMemoryStore()
 	if err != nil {
 		t.Fatalf("NewInMemoryStore: %v", err)
 	}
-	return NewHandler(mint.NewService(store), store, internalToken)
+	return NewHandler(mint.NewService(store, maxTTL), store, internalToken)
 }
 
 func TestHandleMint_RequiresAuthorization(t *testing.T) {
@@ -82,6 +88,30 @@ func TestHandleMint_RejectsWrongToken(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401 with the wrong bearer token, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleMint_RejectsTTLBeyondConfiguredMaxWithBadRequest(t *testing.T) {
+	h := newTestHandlerWithMaxTTL(t, "s3cret", time.Minute)
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]any{
+		"claims":     map[string]any{"sub": "x"},
+		"tokenType":  "jwt",
+		"ttlSeconds": 600,
+	})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/internal/tokens:mint", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer s3cret")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a TTL beyond the configured max, got %d", resp.StatusCode)
 	}
 }
 

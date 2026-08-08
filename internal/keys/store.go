@@ -29,12 +29,9 @@ type Store interface {
 }
 
 // InMemoryStore generates one ES256 key at process startup and keeps it in
-// memory for the life of the process. This is a placeholder for local dev
-// and early testing only: a restart invalidates every outstanding token
-// (nothing to reload from), and there's no rotation. Production use should
-// replace this with something durable -- the design doc calls out reusing
-// an OpenBao-backed secret store, matching how access-platform's
-// internal/secretstore already handles other key material.
+// memory for the life of the process. It's for local dev and early
+// testing only: a restart invalidates every outstanding token, and there's
+// no rotation. See ManagedStore for the horizontally scaled alternative.
 type InMemoryStore struct {
 	key Key
 }

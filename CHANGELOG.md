@@ -11,5 +11,7 @@ once it reaches a tagged release.
 ### Added
 
 - Initial scaffold: in-memory ES256 key store, `Mint` service, and an
-  HTTP API exposing `POST /internal/tokens:mint` and
-  `GET /.well-known/jwks.json`.
+  HTTP API for minting and JWKS.
+- Horizontal scaling: a shared key registry, `keys.ManagedStore` for
+  per-instance signing with publish-before-sign and key retirement, and
+  a separate `cmd/axto-jwks` aggregator service.
