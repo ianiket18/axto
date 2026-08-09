@@ -1,6 +1,5 @@
 // Package httpapi exposes Axto's two endpoints: an internal Mint call and
-// a public JWKS document. There is deliberately no third endpoint -- see
-// the design doc's "Axto's contract never changes" principle.
+// a public JWKS document. There is deliberately no third endpoint.
 package httpapi
 
 import (
@@ -22,11 +21,8 @@ type Handler struct {
 }
 
 // NewHandler builds the HTTP handler. internalToken gates the Mint
-// endpoint -- a placeholder for real service-to-service auth (mTLS, or an
-// internal network boundary that makes this moot); see the design doc's
-// note that this repo has no existing service-to-service auth pattern to
-// reuse yet. An empty internalToken disables Mint entirely rather than
-// leaving it open.
+// endpoint -- a placeholder for real service-to-service auth. An empty
+// internalToken disables Mint entirely rather than leaving it open.
 func NewHandler(mintSvc *mint.Service, keyStore keys.Store, internalToken string) *Handler {
 	return &Handler{mint: mintSvc, keys: keyStore, internalToken: internalToken}
 }
@@ -72,7 +68,7 @@ func (h *Handler) handleMint(w http.ResponseWriter, r *http.Request) {
 		TTL:       time.Duration(req.TTLSeconds) * time.Second,
 	})
 	if err != nil {
-		if errors.Is(err, mint.ErrUnsupportedTokenType) {
+		if errors.Is(err, mint.ErrUnsupportedTokenType) || errors.Is(err, mint.ErrTTLExceedsMax) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

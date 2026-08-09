@@ -18,7 +18,7 @@ func newTestService(t *testing.T) (*Service, keys.Store) {
 	if err != nil {
 		t.Fatalf("NewInMemoryStore: %v", err)
 	}
-	return NewService(store), store
+	return NewService(store, 0), store
 }
 
 func TestMint_ProducesAVerifiableToken(t *testing.T) {
@@ -81,5 +81,38 @@ func TestMint_RejectsNonPositiveTTL(t *testing.T) {
 		TTL:       0,
 	}); err == nil {
 		t.Fatal("expected a zero TTL to be rejected")
+	}
+}
+
+func TestMint_RejectsTTLBeyondConfiguredMax(t *testing.T) {
+	store, err := keys.NewInMemoryStore()
+	if err != nil {
+		t.Fatalf("NewInMemoryStore: %v", err)
+	}
+	svc := NewService(store, time.Minute)
+
+	_, err = svc.Mint(context.Background(), Request{
+		Claims:    map[string]any{"sub": "x"},
+		TokenType: "jwt",
+		TTL:       time.Hour,
+	})
+	if !errors.Is(err, ErrTTLExceedsMax) {
+		t.Fatalf("expected ErrTTLExceedsMax, got %v", err)
+	}
+}
+
+func TestMint_AllowsTTLAtOrBelowConfiguredMax(t *testing.T) {
+	store, err := keys.NewInMemoryStore()
+	if err != nil {
+		t.Fatalf("NewInMemoryStore: %v", err)
+	}
+	svc := NewService(store, time.Minute)
+
+	if _, err := svc.Mint(context.Background(), Request{
+		Claims:    map[string]any{"sub": "x"},
+		TokenType: "jwt",
+		TTL:       time.Minute,
+	}); err != nil {
+		t.Fatalf("expected a TTL equal to the max to be accepted, got %v", err)
 	}
 }

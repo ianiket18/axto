@@ -1,0 +1,23 @@
+# Copy this file, fill in the values, and pass it via: axto -config <path>
+#
+# Omit the database section entirely to run as a single in-memory
+# instance for local development (no rotation, no other instance can see
+# this instance's key).
+
+addr: ":8090"
+
+# Required. Gates POST /internal/tokens:mint. "env:NAME" reads the value
+# from an environment variable instead of storing it here.
+internalToken: "env:AXTO_INTERNAL_TOKEN"
+
+# Optional. Identifies this instance in the key registry; a random UUID
+# is used if omitted.
+# instanceId: "signer-a"
+
+database:
+  url: "env:AXTO_DATABASE_URL"
+
+keys:
+  lifetime: 24h
+  checkInterval: 1m
+  maxTokenTTL: 15m

@@ -1,0 +1,5 @@
+# Single in-memory instance for local development: no database, no
+# rotation, a fixed dev token instead of reading one from the environment.
+
+addr: ":8090"
+internalToken: "devsecret"

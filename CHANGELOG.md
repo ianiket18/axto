@@ -11,5 +11,10 @@ once it reaches a tagged release.
 ### Added
 
 - Initial scaffold: in-memory ES256 key store, `Mint` service, and an
-  HTTP API exposing `POST /internal/tokens:mint` and
-  `GET /.well-known/jwks.json`.
+  HTTP API for minting and JWKS.
+- Horizontal scaling: a shared key registry with versioned migrations,
+  `keys.ManagedStore` for per-instance signing with a stage-at-half-life /
+  activate-at-expiry key lifecycle, and a `cmd/axto-jwks` aggregator.
+- YAML config files (`-config`) replace environment variables for both
+  binaries; secrets can still be sourced from the environment via an
+  `"env:VAR_NAME"` value.
