@@ -12,37 +12,14 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" sql driver
 )
 
-// createTableSQL is run by NewPostgresRegistry so a fresh deployment works
-// without a separate migration step. This is a deliberate simplification
-// for an early-stage project with one table; if Axto grows a real schema,
-// replace this with a proper migration tool instead of adding more
-// CREATE TABLE IF NOT EXISTS statements here.
-const createTableSQL = `
-CREATE TABLE IF NOT EXISTS axto_signing_keys (
-	key_id       TEXT PRIMARY KEY,
-	instance_id  TEXT NOT NULL,
-	public_key   JSONB NOT NULL,
-	published_at TIMESTAMPTZ NOT NULL,
-	retire_at    TIMESTAMPTZ
-)`
-
 // PostgresRegistry is a Registry backed by a shared Postgres database --
 // the intended backing store for a horizontally scaled Axto deployment.
 type PostgresRegistry struct {
 	db *sql.DB
 }
 
-// bootstrapLockKey is an arbitrary constant used with pg_advisory_lock to
-// serialize schema bootstrap across every process racing to start up at
-// once. Plain "CREATE TABLE IF NOT EXISTS" is not safe against concurrent
-// callers -- Postgres can raise a duplicate-key error on its own catalog
-// index when two sessions attempt the create at the same time, which is
-// exactly the failure mode multiple Axto instances starting together will
-// hit without this lock.
-const bootstrapLockKey = 0x4178746f5f4b6579 // "AxtoKey" in hex, arbitrary
-
-// NewPostgresRegistry opens a connection pool against dsn and ensures the
-// backing table exists.
+// NewPostgresRegistry opens a connection pool against dsn and applies any
+// pending migrations, matching every replica's own startup path.
 func NewPostgresRegistry(ctx context.Context, dsn string) (*PostgresRegistry, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -52,33 +29,11 @@ func NewPostgresRegistry(ctx context.Context, dsn string) (*PostgresRegistry, er
 		db.Close()
 		return nil, fmt.Errorf("registry: ping postgres: %w", err)
 	}
-	if err := bootstrapSchema(ctx, db); err != nil {
+	if err := runMigrations(db); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &PostgresRegistry{db: db}, nil
-}
-
-// bootstrapSchema runs the CREATE TABLE under a session-scoped
-// pg_advisory_lock so concurrently starting instances serialize instead of
-// racing on Postgres's own catalog. The lock and the DDL must share one
-// physical connection, hence db.Conn instead of db.ExecContext.
-func bootstrapSchema(ctx context.Context, db *sql.DB) error {
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("registry: acquire connection for schema bootstrap: %w", err)
-	}
-	defer conn.Close()
-
-	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", bootstrapLockKey); err != nil {
-		return fmt.Errorf("registry: acquire bootstrap lock: %w", err)
-	}
-	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", bootstrapLockKey)
-
-	if _, err := conn.ExecContext(ctx, createTableSQL); err != nil {
-		return fmt.Errorf("registry: create table: %w", err)
-	}
-	return nil
 }
 
 func (r *PostgresRegistry) Close() error {

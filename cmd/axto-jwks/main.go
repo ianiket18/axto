@@ -2,7 +2,7 @@
 // Axto deployment: the union of every signer instance's currently
 // servable public keys, read from the same Postgres registry the signer
 // instances (cmd/axto) publish to. It holds no private key material and
-// needs no AXTO_INTERNAL_TOKEN -- there is nothing on this service worth
+// needs no internal token -- there is nothing on this service worth
 // authenticating a caller against.
 //
 // Run one or more replicas of this behind a load balancer; they're
@@ -12,45 +12,41 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
+	"github.com/aniket/axto/internal/config"
 	"github.com/aniket/axto/internal/jwksagg"
 	"github.com/aniket/axto/internal/registry"
 )
 
 func main() {
-	dsn := os.Getenv("AXTO_DATABASE_URL")
-	if dsn == "" {
-		log.Fatal("AXTO_DATABASE_URL must be set")
+	configPath := flag.String("config", "", "path to the aggregator config file (see configs/axto-jwks.example.yaml)")
+	flag.Parse()
+	if *configPath == "" {
+		log.Fatal("must set -config to a config file path (see configs/axto-jwks.example.yaml)")
+	}
+
+	cfg, err := config.LoadAggregatorConfig(*configPath)
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
+	if cfg.Database.URL == "" {
+		log.Fatal("database.url must be set")
 	}
 
 	ctx := context.Background()
-	reg, err := registry.NewPostgresRegistry(ctx, dsn)
+	reg, err := registry.NewPostgresRegistry(ctx, cfg.Database.URL)
 	if err != nil {
 		log.Fatalf("connect to key registry: %v", err)
 	}
 
-	cacheTTL := 10 * time.Second
-	if v := os.Getenv("AXTO_JWKS_CACHE_TTL"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			log.Fatalf("invalid AXTO_JWKS_CACHE_TTL: %v", err)
-		}
-		cacheTTL = d
-	}
+	handler := jwksagg.NewHandler(jwksagg.NewAggregator(reg, time.Duration(cfg.JWKSCacheTTL)))
 
-	handler := jwksagg.NewHandler(jwksagg.NewAggregator(reg, cacheTTL))
-
-	addr := os.Getenv("AXTO_ADDR")
-	if addr == "" {
-		addr = ":8091"
-	}
-
-	log.Printf("axto-jwks listening on %s", addr)
-	if err := http.ListenAndServe(addr, handler.Routes()); err != nil {
+	log.Printf("axto-jwks listening on %s", cfg.Addr)
+	if err := http.ListenAndServe(cfg.Addr, handler.Routes()); err != nil {
 		log.Fatal(err)
 	}
 }

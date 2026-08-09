@@ -11,36 +11,32 @@ import (
 	"github.com/aniket/axto/internal/registry"
 )
 
-// ManagedStore is the Store used by a horizontally scaled deployment: it
+// ManagedStore is the Store used by a horizontally scaled deployment. It
 // still signs from a key cached in local memory -- Current never makes a
-// network call -- but it also keeps the shared registry.Registry in sync
-// so the JWKS aggregator (internal/jwksagg) can see every instance's
-// public key.
-//
-// Two rules matter for correctness and are enforced here, not by callers:
-//
-//   - A new key is published to the registry and that publish call must
-//     succeed before ManagedStore starts signing with it. Otherwise a
-//     verifier could see a token whose kid isn't in JWKS yet.
-//   - When a key is rotated out, it's retired with a deadline far enough
-//     out that any token already signed with it remains verifiable until
-//     that token's own expiry. maxTokenTTL is the caller's declaration of
-//     the longest TTL it will ever hand to mint.Service; ManagedStore
-//     doesn't enforce that cap itself (see mint.Service.MaxTTL for that).
+// network call -- but keeps the shared registry.Registry in sync so the
+// JWKS aggregator can see every instance's public key, and runs its own
+// key lifecycle: each signing key has a lifetime, a replacement is staged
+// (published but not yet used) once the current key is past half its
+// lifetime, and that replacement becomes the signing key once the current
+// one's lifetime is up. The outgoing key stays servable in JWKS for
+// maxTokenTTL afterward so tokens it already signed remain verifiable.
 type ManagedStore struct {
-	mu          sync.RWMutex
-	current     Key
+	mu               sync.RWMutex
+	current          Key
+	currentExpiresAt time.Time
+	staged           *Key
+
 	reg         registry.Registry
 	instanceID  string
+	keyLifetime time.Duration
 	maxTokenTTL time.Duration
 }
 
 // NewManagedStore generates the instance's first signing key, publishes it
-// to reg, and returns a ManagedStore ready to sign. instanceID identifies
-// this process in the registry (for observability, not correctness) and
-// maxTokenTTL is the retirement grace period used by Rotate.
-func NewManagedStore(ctx context.Context, reg registry.Registry, instanceID string, maxTokenTTL time.Duration) (*ManagedStore, error) {
-	s := &ManagedStore{reg: reg, instanceID: instanceID, maxTokenTTL: maxTokenTTL}
+// to reg, and returns a ManagedStore ready to sign. Call Run (or Tick on
+// your own schedule) to drive the staging/activation lifecycle.
+func NewManagedStore(ctx context.Context, reg registry.Registry, instanceID string, keyLifetime, maxTokenTTL time.Duration) (*ManagedStore, error) {
+	s := &ManagedStore{reg: reg, instanceID: instanceID, keyLifetime: keyLifetime, maxTokenTTL: maxTokenTTL}
 	key, err := generateKey()
 	if err != nil {
 		return nil, fmt.Errorf("keys: generate signing key: %w", err)
@@ -50,6 +46,7 @@ func NewManagedStore(ctx context.Context, reg registry.Registry, instanceID stri
 	}
 	s.mu.Lock()
 	s.current = key
+	s.currentExpiresAt = time.Now().Add(keyLifetime)
 	s.mu.Unlock()
 	return s, nil
 }
@@ -61,9 +58,8 @@ func (s *ManagedStore) Current() Key {
 }
 
 // JWKS returns only this instance's own current public key. It exists for
-// local introspection (e.g. a debug endpoint on the signer itself); the
-// JWKS a verifier should actually trust is the aggregator's, which unions
-// every instance's servable keys via the shared registry.
+// local introspection; the JWKS a verifier should trust is the
+// aggregator's, which unions every instance's servable keys.
 func (s *ManagedStore) JWKS() jose.JSONWebKeySet {
 	key := s.Current()
 	return jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
@@ -74,11 +70,50 @@ func (s *ManagedStore) JWKS() jose.JSONWebKeySet {
 	}}}
 }
 
-// Rotate generates a new signing key, publishes it, switches Current to
-// it, and retires the outgoing key with a deadline of maxTokenTTL from
-// now. Callers wanting periodic rotation should call this on a timer;
-// ManagedStore itself has no background goroutine.
-func (s *ManagedStore) Rotate(ctx context.Context) error {
+// Tick advances the key lifecycle. Call it on a schedule shorter than
+// keyLifetime/2 so the staging and activation points below are caught
+// promptly rather than drifting.
+func (s *ManagedStore) Tick(ctx context.Context) error {
+	s.mu.RLock()
+	expiresAt := s.currentExpiresAt
+	alreadyStaged := s.staged != nil
+	s.mu.RUnlock()
+
+	now := time.Now()
+	halfLife := expiresAt.Add(-s.keyLifetime / 2)
+
+	if !alreadyStaged && now.After(halfLife) {
+		if err := s.stage(ctx); err != nil {
+			return err
+		}
+	}
+	if now.After(expiresAt) {
+		if err := s.activateStaged(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Run calls Tick every checkInterval until ctx is done. Errors are
+// reported via onError (nil is fine to ignore them); Tick simply retries
+// at the next tick either way.
+func (s *ManagedStore) Run(ctx context.Context, checkInterval time.Duration, onError func(error)) {
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.Tick(ctx); err != nil && onError != nil {
+				onError(err)
+			}
+		}
+	}
+}
+
+func (s *ManagedStore) stage(ctx context.Context) error {
 	newKey, err := generateKey()
 	if err != nil {
 		return fmt.Errorf("keys: generate signing key: %w", err)
@@ -86,14 +121,26 @@ func (s *ManagedStore) Rotate(ctx context.Context) error {
 	if err := s.publish(ctx, newKey); err != nil {
 		return err
 	}
-
 	s.mu.Lock()
-	oldKey := s.current
-	s.current = newKey
+	s.staged = &newKey
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *ManagedStore) activateStaged(ctx context.Context) error {
+	s.mu.Lock()
+	if s.staged == nil {
+		s.mu.Unlock()
+		return nil
+	}
+	outgoing := s.current
+	s.current = *s.staged
+	s.currentExpiresAt = time.Now().Add(s.keyLifetime)
+	s.staged = nil
 	s.mu.Unlock()
 
-	if err := s.reg.Retire(ctx, oldKey.ID, time.Now().Add(s.maxTokenTTL)); err != nil {
-		return fmt.Errorf("keys: retire outgoing key %q: %w", oldKey.ID, err)
+	if err := s.reg.Retire(ctx, outgoing.ID, time.Now().Add(s.maxTokenTTL)); err != nil {
+		return fmt.Errorf("keys: retire outgoing key %q: %w", outgoing.ID, err)
 	}
 	return nil
 }

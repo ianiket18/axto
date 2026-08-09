@@ -35,18 +35,17 @@ proposing something that would change it.
 
 ## Running locally
 
-Single instance, no database, no rotation — for local development only:
+Axto is configured entirely from a YAML file, passed with `-config`:
 
 ```
-AXTO_INTERNAL_TOKEN=devsecret go run ./cmd/axto
+go run ./cmd/axto -config configs/axto.dev.yaml
 ```
 
-`AXTO_INTERNAL_TOKEN` is required — it's the shared secret that gates
-`/internal/tokens:mint`. This is a placeholder for real service-to-service
-auth (mTLS, or an internal-only network boundary that makes the whole
-question moot).
-
-`AXTO_ADDR` overrides the listen address (default `:8090`).
+`configs/axto.dev.yaml` is a single in-memory instance with no database
+and no rotation — for local development only. `internalToken` is the
+shared secret that gates `/internal/tokens:mint`; it's a placeholder for
+real service-to-service auth (mTLS, or an internal-only network boundary
+that makes the whole question moot).
 
 ## Running horizontally
 
@@ -76,44 +75,47 @@ flowchart TB
     JWKS -->|"GET /.well-known/jwks.json"| V
 ```
 
-Two rules make this safe, enforced in code rather than left as convention:
+Each key also has its own lifecycle, ticked by `keys.ManagedStore` on a
+schedule rather than rotated all-at-once:
 
-- **Publish before sign.** `keys.ManagedStore` publishes a new key to the
-  registry and only switches to signing with it after that publish
-  succeeds — a verifier should never see a `kid` that isn't in JWKS yet.
-- **Retire, don't delete.** When a key rotates out, it's kept servable in
-  JWKS until `AXTO_MAX_TOKEN_TTL` after rotation — long enough for any
-  token already signed with it to finish its own lifetime.
-  `mint.Service` enforces the matching cap on the other end: it rejects
-  any mint request whose TTL would outlive that retirement window, so a
-  token can never outlive its own verifiability.
+- **Stage past half life.** Once a key is past half of `keys.lifetime`,
+  a replacement is generated and published — but not used for signing yet.
+- **Activate at expiry.** Once the current key's lifetime is up, the
+  staged key becomes the signer, and the outgoing key is retired.
+- **Retire, don't delete.** A retired key stays servable in JWKS for
+  `keys.maxTokenTTL` afterward — long enough for any token it already
+  signed to finish its own lifetime. `mint.Service` enforces the matching
+  cap on requests, so a token can never outlive its own verifiability.
+  Keep `maxTokenTTL` at or below half of `lifetime` so at most two keys
+  are ever servable at once in steady state.
+- **Publish before sign**, always — a verifier should never see a `kid`
+  that isn't in JWKS yet.
+
+Copy [`configs/axto.example.yaml`](configs/axto.example.yaml) and
+[`configs/axto-jwks.example.yaml`](configs/axto-jwks.example.yaml), fill
+them in, and run:
 
 ```
-# every instance, including cmd/axto-jwks
-AXTO_DATABASE_URL=postgres://user:pass@host:5432/axto
-
-# cmd/axto only
-AXTO_INTERNAL_TOKEN=...            # required, gates /internal/tokens:mint
-AXTO_MAX_TOKEN_TTL=15m             # default 15m; also the key-retirement grace period
-AXTO_KEY_ROTATION_PERIOD=24h       # default 24h
-AXTO_INSTANCE_ID=...               # optional; random UUID if unset
-
-# cmd/axto-jwks only
-AXTO_JWKS_CACHE_TTL=10s            # default 10s
+axto -config /path/to/axto.yaml
+axto-jwks -config /path/to/axto-jwks.yaml
 ```
+
+A config value written as `"env:VAR_NAME"` is read from the environment
+instead of the file — the intended way to keep secrets (the internal
+token, the database URL) out of a file that might get checked in.
 
 Run several `cmd/axto` replicas and one or more `cmd/axto-jwks` replicas
-behind a load balancer, all pointed at the same database.
+behind a load balancer, all pointed at the same database. Schema changes
+are applied automatically on startup by every instance, via versioned
+migrations under `internal/registry/migrations` — safe under concurrent
+startup since the migration driver takes its own advisory lock.
 
 ## Status
 
 Early: in-memory signing key per instance (`keys.InMemoryStore` for a
 single dev process, `keys.ManagedStore` for the horizontally scaled mode
 above), a Postgres-backed key registry, and the JWKS aggregator. Not yet
-wired into a real caller, and the registry has no migration tool beyond
-`CREATE TABLE IF NOT EXISTS` on startup (guarded by a Postgres advisory
-lock so concurrent instances don't race on it, but still a placeholder
-for a real schema-migration story if this grows past one table).
+wired into a real caller.
 
 ## Contributing
 

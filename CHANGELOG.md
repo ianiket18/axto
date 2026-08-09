@@ -12,6 +12,9 @@ once it reaches a tagged release.
 
 - Initial scaffold: in-memory ES256 key store, `Mint` service, and an
   HTTP API for minting and JWKS.
-- Horizontal scaling: a shared key registry, `keys.ManagedStore` for
-  per-instance signing with publish-before-sign and key retirement, and
-  a separate `cmd/axto-jwks` aggregator service.
+- Horizontal scaling: a shared key registry with versioned migrations,
+  `keys.ManagedStore` for per-instance signing with a stage-at-half-life /
+  activate-at-expiry key lifecycle, and a `cmd/axto-jwks` aggregator.
+- YAML config files (`-config`) replace environment variables for both
+  binaries; secrets can still be sourced from the environment via an
+  `"env:VAR_NAME"` value.

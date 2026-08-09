@@ -1,0 +1,8 @@
+# Copy this file, fill in the values, and pass it via: axto-jwks -config <path>
+
+addr: ":8091"
+
+database:
+  url: "env:AXTO_DATABASE_URL"
+
+jwksCacheTTL: 10s
